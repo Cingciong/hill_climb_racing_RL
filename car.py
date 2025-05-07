@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 class Car:
 
-    def __init__(self, space, x, y, screen, debug_mode, spring_length=20, spring_stiffness=1000, damping=30):
+    def __init__(self, space, x, y, screen, debug_mode, spring_length=20, spring_stiffness=300, damping=30):
         self.space = space
         self.x = x
         self.y = y
@@ -192,7 +192,7 @@ class Car:
             self.last_gasoline_time = current_time
         self.score = 1
         stats_text = f"Distance: {self.distance} m | Coins: {self.coins} | Gasoline: {self.gasoline}s | Score: {self.score}"
-        print(stats_text)
+
 
     def get_screen_image(self):
         surface = pygame.display.get_surface()
@@ -234,14 +234,7 @@ class Car:
 
         return {"image": image_flat, "scalars": scalars}
 
-    def compute_reward(self):
-        reward = self.distance - self.last_distance
-        self.last_distance = self.distance
 
-        if reward < 0:
-            reward *= 2
-
-        return reward
 
 
 

@@ -7,6 +7,7 @@ from car import Car  # Your car class
 from constants import *  # Your constant values (FPS, GRAVITY, etc.)
 import numpy as np
 import matplotlib.pyplot as plt
+import torch
 
 
 class Game:
@@ -29,8 +30,8 @@ class Game:
 
         self.last_distance = 0
 
-    def reset_environment(self):
-        print("Resetting environment")
+    def reset(self):
+
 
         del self.car
         del self.terrain
@@ -60,13 +61,12 @@ class Game:
         angle_norm = np.clip(np.array(angle / 180.0, dtype=np.float32), -1.0, 1.0)
         angular_velocity_norm = np.clip(np.array(angular_velocity / 360.0, dtype=np.float32), -1.0, 1.0)
 
-        scalars = np.array([speed_norm, angle_norm, angular_velocity_norm], dtype=np.float32)
+        scalars_flat = np.array([speed_norm, angle_norm, angular_velocity_norm], dtype=np.float32)
 
+        input_image = torch.tensor(image_flat, dtype=torch.float32).view(1, 1, 30, 50).clone().detach()
+        input_scalar = torch.tensor(scalars_flat, dtype=torch.float32).clone().detach()
 
-        print("Flattened Image Array:", image_flat.shape)
-        print("Scalars Array:", scalars.shape)
-
-        return  image_flat,  scalars
+        return  input_image,  input_scalar
 
     def compute_reward(self):
         reward = self.car.distance - self.last_distance
@@ -78,39 +78,66 @@ class Game:
     def draw_background(self):
         self.screen.fill(SKY_COLOR)
 
-    def main_loop(self):
-        agent = Agent()
+    def reward(self):
+        reward = self.car.distance
+        print(f"Reward: {reward}")
+        return reward
 
+    def step(self, action):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
 
+        if self.car.body.position.x <= 0:
+            print("Game Over: Car hit the left edge (x ≤ 0)")
+            self.car.running = False
+            self.running = False
+        # === Apply action to car ===
+        self.car.apply_action(action)
 
-        while self.running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.running = False
+        # === Step physics and render ===
+        camera_x, camera_y = self.car.update_position(self.screen)
+        self.draw_options.transform = pymunk.Transform.translation(-camera_x, -camera_y)
+        self.draw_background()
+        self.terrain.draw_grass(camera_x, camera_y)
+        self.space.step(1 / self.FPS)
+        self.space.debug_draw(self.draw_options)
+        self.car.draw()
 
-            if not self.car.running:
-                self.reset_environment()
+        pygame.display.flip()
+        self.clock.tick(self.FPS)
 
-            image_flat, scalars = self.get_observation()
-            action = agent.get_action(image_flat, scalars)
-            self.car.apply_action(action)
+        image_flat,  scalars_flat = self.get_observation()
+        done = not self.car.running
 
-            reward = self.car.compute_reward()
-            print(f"Reward: {reward}")
+        return image_flat, scalars_flat , done
 
+    # def main_loop(self):
+    #     while self.running:
+    #         for event in pygame.event.get():
+    #             if event.type == pygame.QUIT:
+    #                 self.running = False
+    #
+    #         if not self.car.running:
+    #             self.reset_environment()
+    #
+    #         self.car.apply_torque(keys=pygame.key.get_pressed())
+    #
+    #         reward = self.car.compute_reward()
+    #         print(f"Reward: {reward}")
+    #
+    #         camera_x, camera_y = self.car.update_position(self.screen)
+    #         self.draw_options.transform = pymunk.Transform.translation(-camera_x, -camera_y)
+    #         self.draw_background()
+    #         self.terrain.draw_grass(camera_x, camera_y)
+    #         self.space.step(1 / self.FPS)
+    #         self.space.debug_draw(self.draw_options)
+    #         self.car.draw()
+    #
+    #
+    #         pygame.display.flip()
+    #         self.clock.tick(self.FPS)
+    #
+    #     pygame.quit()
 
-
-            camera_x, camera_y = self.car.update_position(self.screen)
-            self.draw_options.transform = pymunk.Transform.translation(-camera_x, -camera_y)
-            self.draw_background()
-            self.terrain.draw_grass(camera_x, camera_y)
-            self.space.step(1 / self.FPS)
-            self.space.debug_draw(self.draw_options)
-            self.car.draw()
-
-
-            pygame.display.flip()
-            self.clock.tick(self.FPS)
-
-        pygame.quit()
 
