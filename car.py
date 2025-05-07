@@ -2,6 +2,7 @@ import pygame
 import pymunk
 from constants import *
 import numpy as np
+import matplotlib.pyplot as plt
 
 class Car:
 
@@ -19,6 +20,8 @@ class Car:
         self.car_torque = 1000
         self.spin_torque = 10000
         self.point_of_force_application = (0, 10)
+        self.running = True
+
 
         # Stats
         self.distance = 0
@@ -27,6 +30,7 @@ class Car:
         self.score = 0
         self.start_x = x
         self.last_gasoline_time = pygame.time.get_ticks()
+        self.last_distance = 0
 
         # Create car
         self.create_car()
@@ -38,6 +42,7 @@ class Car:
         self.body = pymunk.Body(1, 100)
         self.body.position = self.x, self.y
         self.chassis = pymunk.Poly.create_box(self.body, (60, 20))
+        self.chassis.color = CAR_COLOR
         self.chassis.friction = 1.0
         self.chassis.collision_type = CHASSIS  # Use the global constant CHASSIS
         self.space.add(self.body, self.chassis)
@@ -45,11 +50,12 @@ class Car:
         self.start_x = self.body.position.x
 
         self.wheels = []
-        for dx in [-25, 25]:
+        for dx in [-CAR_WHEEL_SPAN, CAR_WHEEL_SPAN]:
             wheel_body = pymunk.Body(0.5, pymunk.moment_for_circle(0.5, 0, 15))
             wheel_body.position = self.x + dx, self.y + 40
             wheel = pymunk.Circle(wheel_body, 15)
             wheel.friction = 2.5
+            wheel.color = WHEEL_COLOR
             wheel.collision_type = WHEEL  # Use the global constant WHEEL
             self.space.add(wheel_body, wheel)
             self.wheels.append(wheel_body)
@@ -61,16 +67,16 @@ class Car:
                                          self.spring_length, self.spring_stiffness, self.damping)
             self.space.add(spring)
 
-        person_mass = 0.0000001
-        person_size = (25, 20)
+        person_mass = PERSON_MASS
+        person_size = PERSON_SIZE
         person_moment = pymunk.moment_for_box(person_mass, person_size)
         self.person_body = pymunk.Body(person_mass, person_moment)
         self.person_body.position = self.body.position + (0, 0)
 
         self.person_shape = pymunk.Poly.create_box(self.person_body, person_size)
         self.person_shape.friction = 1.0
-        self.person_shape.collision_type = PERSON  # Use the global constant PERSON
-        self.person_shape.color = (255, 69, 0, 255)
+        self.person_shape.collision_type = PERSON
+        self.person_shape.color = PERSON_COLOR
 
         self.space.add(self.person_body, self.person_shape)
 
@@ -92,7 +98,7 @@ class Car:
     def handle_person_terrain_collision(self, arbiter, space, data):
         print("Person collided with the terrain. Game Over!")
         self.running = False
-        return True  # Allow the collision to happen
+        return True
 
     def handle_collision_begin(self, arbiter, space, data):
         # Check if either the wheel or the chassis is colliding with the ground (terrain)
@@ -103,6 +109,21 @@ class Car:
                 self.car_on_ground = True
                 return True
         return False
+
+    def limit_speed(self):
+        # Limit linear velocity
+        max_velocity = MAX_SPEED * PX_IN_METER  # convert to pixels/second
+        velocity = self.body.velocity
+        speed = velocity.length
+        if speed > max_velocity:
+            scale = max_velocity / speed
+            self.body.velocity = velocity * scale
+
+        # Limit angular velocity (convert max to radians/sec)
+        max_angular_velocity = np.radians(MAX_ANGULAR_SPEED_DEG)  # e.g., 360 deg/s
+        angular_speed = abs(self.body.angular_velocity)
+        if angular_speed > max_angular_velocity:
+            self.body.angular_velocity = np.sign(self.body.angular_velocity) * max_angular_velocity
 
     def handle_collision_separate(self, arbiter, space, data):
         # Check if either the wheel or the chassis has separated from the terrain
@@ -127,9 +148,31 @@ class Car:
             if keys[pygame.K_LEFT]:
                 self.body.torque -= self.spin_torque
 
+        self.limit_speed()
+
+    def apply_action(self, action):
+        """
+        Apply the action chosen by the agent.
+        action == 0 -> Turn right (apply positive torque)
+        action == 1 -> Turn left (apply negative torque)
+        action == 2 -> No action (do nothing)
+        """
+        if self.car_on_ground:
+            if action == 0:  # Turn right (simulate turning right)
+                self.body.apply_force_at_local_point((self.car_torque, 0), self.point_of_force_application)
+            elif action == 1:  # Turn left (simulate turning left)
+                self.body.apply_force_at_local_point((-self.car_torque, 0), self.point_of_force_application)
+        else:
+            if action == 0:  # Turn right (apply spin torque)
+                self.body.torque += self.spin_torque
+            elif action == 1:  # Turn left (apply spin torque)
+                self.body.torque -= self.spin_torque
+
+        self.limit_speed()  # Limit the car's speed if necessary
+
     def update_person_position(self):
         person_offset_x = 0
-        person_offset_y = -30
+        person_offset_y = PERSON_OFFSET
         self.person.position = (self.body.position.x + person_offset_x, self.body.position.y + person_offset_y)
 
     def update_position(self, screen):
@@ -142,7 +185,7 @@ class Car:
         return camera_x, camera_y
 
     def draw(self):
-        self.distance = (self.body.position.x-self.start_x)/15
+        self.distance = (self.body.position.x-self.start_x)/PX_IN_METER
         current_time = pygame.time.get_ticks()
         if current_time - self.last_gasoline_time >= 1000:
             self.gasoline = max(0, self.gasoline - 1)
@@ -152,8 +195,54 @@ class Car:
         print(stats_text)
 
     def get_screen_image(self):
-        raw_pixels = pygame.surfarray.array3d(pygame.display.get_surface())
-        # Transpose to match PyTorch [C, H, W] format
-        image = np.transpose(raw_pixels, (2, 0, 1))  # [3, H, W]
-        image = image / 255.0  # Normalize to [0, 1]
-        return image.astype(np.float32)
+        surface = pygame.display.get_surface()
+        width, height = surface.get_size()
+
+        scaled_width,scaled_height = MODEL_CONTEXT_WINDOW
+
+        scaled_surface = pygame.transform.smoothscale(surface, (scaled_width, scaled_height))
+
+        raw_pixels = pygame.surfarray.array3d(scaled_surface)  # [W, H, 3]
+        image = np.transpose(raw_pixels, (1, 0, 2)) / 255.0  # [H, W, 3]
+        grayscale_image = np.mean(image, axis=2)  # [H, W]
+
+        return grayscale_image.astype(np.float32)
+
+    def get_speed(self):
+        return self.body.velocity[0] / PX_IN_METER
+
+    def get_angle(self):
+        return self.body.angle * 180 / np.pi
+
+    def get_angular_velocity(self):
+        return self.body.angular_velocity * 180 / np.pi
+
+    def get_observation(self):
+        grayscale_image = self.get_screen_image()  # shape: (H, W)
+        image_flat = grayscale_image.flatten()  # shape: (H * W,)
+
+        # Get and normalize scalar features
+        speed = self.get_speed()  # m/s
+        angle = self.get_angle()  # degrees
+        angular_velocity = self.get_angular_velocity()  # deg/s
+
+        speed_norm = np.clip(speed / 30.0, -1.0, 1.0)  # assume max speed ~30 m/s
+        angle_norm = np.clip(angle / 180.0, -1.0, 1.0)  # degrees -> [-1, 1]
+        angular_velocity_norm = np.clip(angular_velocity / 360.0, -1.0, 1.0)  # assume ±360 deg/s
+
+        scalars = np.array([speed_norm, angle_norm, angular_velocity_norm], dtype=np.float32)
+
+        return {"image": image_flat, "scalars": scalars}
+
+    def compute_reward(self):
+        reward = self.distance - self.last_distance
+        self.last_distance = self.distance
+
+        if reward < 0:
+            reward *= 2
+
+        return reward
+
+
+
+

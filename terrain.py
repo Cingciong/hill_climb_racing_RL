@@ -1,6 +1,7 @@
 import pymunk
 import pygame
 from perlin_noise import PerlinNoise
+from constants import *
 
 
 class Terrain:
@@ -33,12 +34,13 @@ class Terrain:
             segment = pymunk.Segment(self.space.static_body, last_point, (x, y), 5)
             segment.friction = 1.0
             segment.collision_type = 0
+            segment.color = TERRAIN_COLOR
             self.space.add(segment)
 
             last_point = (x, y)
 
     def draw_grass(self, camera_x, camera_y):
-        grass_color = ('#695439')
+        grass_color = (GRASS_COLOR)
         for i, (x, y) in enumerate(self.terrain_points):
             adjusted_x = x - camera_x
             adjusted_y = y - camera_y
