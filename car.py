@@ -1,17 +1,24 @@
-import pygame
 import pymunk
-from constants import *
+import pygame
 import numpy as np
-import matplotlib.pyplot as plt
+import torch
+from constants import *  # Import your constants like car colors, etc.
+
+CATEGORY_CAR = 0b001
+CATEGORY_TERRAIN = 0b010
+CATEGORY_PERSON = 0b100
+
+CAR_MASK = CATEGORY_TERRAIN  # Car can collide with terrain
+TERRAIN_MASK = CATEGORY_CAR | CATEGORY_TERRAIN | CATEGORY_PERSON  # Terrain can collide with everything
+
 
 class Car:
-
-    def __init__(self, space, x, y, screen, debug_mode, spring_length=20, spring_stiffness=300, damping=30):
+    def __init__(self, space, x, y, screen, car_id, spring_length=20, spring_stiffness=300, damping=30):
+        self.car_id = car_id
         self.space = space
         self.x = x
         self.y = y
         self.screen = screen
-        self.debug_mode = debug_mode
         self.spring_length = spring_length
         self.spring_stiffness = spring_stiffness
         self.damping = damping
@@ -22,33 +29,34 @@ class Car:
         self.point_of_force_application = (0, 10)
         self.running = True
 
-
-        # Stats
         self.distance = 0
         self.coins = 0
         self.gasoline = 60
         self.score = 0
         self.start_x = x
         self.last_gasoline_time = pygame.time.get_ticks()
-        self.last_distance = 0
+        self.person_offset = pymunk.Vec2d(0, -20)  # Adjust as needed
+        self.person_stuck = True  # Start allowing the person to stay stuck
 
-        # Create car
         self.create_car()
-
-        # Add collision handlers
         self.add_collision_handlers()
 
     def create_car(self):
+        # Create the car body and chassis
         self.body = pymunk.Body(1, 100)
         self.body.position = self.x, self.y
         self.chassis = pymunk.Poly.create_box(self.body, (60, 20))
         self.chassis.color = CAR_COLOR
         self.chassis.friction = 1.0
-        self.chassis.collision_type = CHASSIS  # Use the global constant CHASSIS
+
+        # **Collision Filter: Exclude collision between this car's components and other cars**
+        self.chassis.filter = pymunk.ShapeFilter(categories=CATEGORY_CAR, mask=(CATEGORY_TERRAIN | CATEGORY_PERSON | CATEGORY_CAR))  # Allow internal collision with person and wheels
+
+        self.chassis.collision_type = CHASSIS
         self.space.add(self.body, self.chassis)
-        self.body.position = self.x, self.y
         self.start_x = self.body.position.x
 
+        # Create wheels
         self.wheels = []
         for dx in [-CAR_WHEEL_SPAN, CAR_WHEEL_SPAN]:
             wheel_body = pymunk.Body(0.5, pymunk.moment_for_circle(0.5, 0, 15))
@@ -56,59 +64,72 @@ class Car:
             wheel = pymunk.Circle(wheel_body, 15)
             wheel.friction = 2.5
             wheel.color = WHEEL_COLOR
-            wheel.collision_type = WHEEL  # Use the global constant WHEEL
+
+            # **Collision Filter for the wheels: Allow collision with chassis and person, but not other cars**
+            wheel.filter = pymunk.ShapeFilter(categories=CATEGORY_CAR, mask=(CATEGORY_TERRAIN | CATEGORY_PERSON | CATEGORY_CAR))
+
+            wheel.collision_type = WHEEL
             self.space.add(wheel_body, wheel)
             self.wheels.append(wheel_body)
 
             groove = pymunk.GrooveJoint(self.body, wheel_body, (dx, 10), (dx, 60), (0, 0))
-            self.space.add(groove)
-
             spring = pymunk.DampedSpring(self.body, wheel_body, (dx, 10), (0, 0),
                                          self.spring_length, self.spring_stiffness, self.damping)
-            self.space.add(spring)
+            self.space.add(groove, spring)
 
+        # Create person and attach it to the car's chassis
         person_mass = PERSON_MASS
         person_size = PERSON_SIZE
         person_moment = pymunk.moment_for_box(person_mass, person_size)
         self.person_body = pymunk.Body(person_mass, person_moment)
-        self.person_body.position = self.body.position + (0, 0)
+        self.person_body.position = self.body.position + self.person_offset
 
         self.person_shape = pymunk.Poly.create_box(self.person_body, person_size)
         self.person_shape.friction = 1.0
         self.person_shape.collision_type = PERSON
         self.person_shape.color = PERSON_COLOR
 
+        # **Collision Filter: Person should collide with chassis and wheels, but not other cars**
+        self.person_shape.filter = pymunk.ShapeFilter(categories=CATEGORY_PERSON, mask=(CATEGORY_TERRAIN | CATEGORY_CAR | CATEGORY_PERSON))
+
         self.space.add(self.person_body, self.person_shape)
 
-        joint = pymunk.PinJoint(self.body, self.person_body, (0, 0), (0, 10))
-        self.space.add(joint)
+        # Pin joint between person and chassis to keep the person stuck to the chassis
+        self.pin_joint = pymunk.PinJoint(self.body, self.person_body, (0, 0), (0, 10))
+        self.space.add(self.pin_joint)
 
     def add_collision_handlers(self):
-        handler_car_terrain = self.space.add_collision_handler(WHEEL, TERRAIN)
-        handler_car_terrain.begin = self.handle_collision_begin
-        handler_car_terrain.separate = self.handle_collision_separate
-
-        handler_car_terrain_chassis = self.space.add_collision_handler(CHASSIS, TERRAIN)
-        handler_car_terrain_chassis.begin = self.handle_collision_begin
-        handler_car_terrain_chassis.separate = self.handle_collision_separate
-
-        handler_person_terrain = self.space.add_collision_handler(PERSON, TERRAIN)
-        handler_person_terrain.begin = self.handle_person_terrain_collision
-
-    def handle_person_terrain_collision(self, arbiter, space, data):
-        print("Person collided with the terrain. Game Over!")
-        self.running = False
-        return True
+        # Add your collision handlers here if needed
+        # This is optional depending on the game behavior.
+        pass
 
     def handle_collision_begin(self, arbiter, space, data):
-        # Check if either the wheel or the chassis is colliding with the ground (terrain)
-        shapes = arbiter.shapes
-        for shape in shapes:
-            if shape.collision_type == WHEEL or shape.collision_type == CHASSIS:
-                self.car_contacts += 1
-                self.car_on_ground = True
-                return True
-        return False
+        self.car_contacts += 1
+        self.car_on_ground = True
+        return True
+
+    def handle_collision_separate(self, arbiter, space, data):
+        self.car_contacts = max(0, self.car_contacts - 1)
+        if self.car_contacts == 0:
+            self.car_on_ground = False
+        return True
+
+    def update_person_position(self):
+        # Update person position to stay with the car
+        self.person_body.position = self.body.position + self.person_offset
+
+    def apply_action(self, action):
+        if self.car_on_ground:
+            if action == 0:  # Accelerate forward
+                self.body.apply_force_at_local_point((self.car_torque, 0), self.point_of_force_application)
+            elif action == 1:  # Accelerate backward
+                self.body.apply_force_at_local_point((-self.car_torque, 0), self.point_of_force_application)
+        else:
+            if action == 0:  # Spin forward
+                self.body.torque += self.spin_torque
+            elif action == 1:  # Spin backward
+                self.body.torque -= self.spin_torque
+        self.limit_speed()  # Ensure the car doesn't exceed the maximum speed
 
     def limit_speed(self):
         # Limit linear velocity
@@ -125,87 +146,31 @@ class Car:
         if angular_speed > max_angular_velocity:
             self.body.angular_velocity = np.sign(self.body.angular_velocity) * max_angular_velocity
 
-    def handle_collision_separate(self, arbiter, space, data):
-        # Check if either the wheel or the chassis has separated from the terrain
-        shapes = arbiter.shapes
-        for shape in shapes:
-            if shape.collision_type == WHEEL or shape.collision_type == CHASSIS:
-                self.car_contacts = max(0, self.car_contacts - 1)
-                if self.car_contacts == 0:
-                    self.car_on_ground = False
-                return True
-        return False
-
-    def apply_torque(self, keys):
-        if self.car_on_ground:
-            if keys[pygame.K_RIGHT]:
-                self.body.apply_force_at_local_point((self.car_torque, 0), self.point_of_force_application)
-            if keys[pygame.K_LEFT]:
-                self.body.apply_force_at_local_point((-self.car_torque, 0), self.point_of_force_application)
-        else:
-            if keys[pygame.K_RIGHT]:
-                self.body.torque += self.spin_torque
-            if keys[pygame.K_LEFT]:
-                self.body.torque -= self.spin_torque
-
-        self.limit_speed()
-
-    def apply_action(self, action):
-        """
-        Apply the action chosen by the agent.
-        action == 0 -> Turn right (apply positive torque)
-        action == 1 -> Turn left (apply negative torque)
-        action == 2 -> No action (do nothing)
-        """
-        if self.car_on_ground:
-            if action == 0:  # Turn right (simulate turning right)
-                self.body.apply_force_at_local_point((self.car_torque, 0), self.point_of_force_application)
-            elif action == 1:  # Turn left (simulate turning left)
-                self.body.apply_force_at_local_point((-self.car_torque, 0), self.point_of_force_application)
-        else:
-            if action == 0:  # Turn right (apply spin torque)
-                self.body.torque += self.spin_torque
-            elif action == 1:  # Turn left (apply spin torque)
-                self.body.torque -= self.spin_torque
-
-        self.limit_speed()  # Limit the car's speed if necessary
-
-    def update_person_position(self):
-        person_offset_x = 0
-        person_offset_y = PERSON_OFFSET
-        self.person.position = (self.body.position.x + person_offset_x, self.body.position.y + person_offset_y)
-
     def update_position(self, screen):
         car_pos_x = self.body.position.x
         car_pos_y = self.body.position.y
         screen_center_x = screen.get_width() // 3
         screen_center_y = screen.get_height() // 2
-        camera_x = car_pos_x - screen_center_x
-        camera_y = car_pos_y - screen_center_y
-        return camera_x, camera_y
+        return car_pos_x - screen_center_x, car_pos_y - screen_center_y
 
     def draw(self):
-        self.distance = (self.body.position.x-self.start_x)/PX_IN_METER
+        self.distance = (self.body.position.x - self.start_x) / PX_IN_METER
         current_time = pygame.time.get_ticks()
         if current_time - self.last_gasoline_time >= 1000:
             self.gasoline = max(0, self.gasoline - 1)
             self.last_gasoline_time = current_time
         self.score = 1
-        stats_text = f"Distance: {self.distance} m | Coins: {self.coins} | Gasoline: {self.gasoline}s | Score: {self.score}"
+        stats_text = f"Distance: {self.distance:.2f} m | Coins: {self.coins} | Gasoline: {self.gasoline}s | Score: {self.score}"
+
 
 
     def get_screen_image(self):
         surface = pygame.display.get_surface()
         width, height = surface.get_size()
-
-        scaled_width,scaled_height = MODEL_CONTEXT_WINDOW
-
-        scaled_surface = pygame.transform.smoothscale(surface, (scaled_width, scaled_height))
-
-        raw_pixels = pygame.surfarray.array3d(scaled_surface)  # [W, H, 3]
-        image = np.transpose(raw_pixels, (1, 0, 2)) / 255.0  # [H, W, 3]
-        grayscale_image = np.mean(image, axis=2)  # [H, W]
-
+        scaled_surface = pygame.transform.smoothscale(surface, MODEL_CONTEXT_WINDOW)
+        raw_pixels = pygame.surfarray.array3d(scaled_surface)
+        image = np.transpose(raw_pixels, (1, 0, 2)) / 255.0
+        grayscale_image = np.mean(image, axis=2)
         return grayscale_image.astype(np.float32)
 
     def get_speed(self):
@@ -218,24 +183,25 @@ class Car:
         return self.body.angular_velocity * 180 / np.pi
 
     def get_observation(self):
-        grayscale_image = self.get_screen_image()  # shape: (H, W)
-        image_flat = grayscale_image.flatten()  # shape: (H * W,)
+        grayscale_image = self.get_screen_image()
+        grayscale_image = pygame.surfarray.make_surface(grayscale_image)
+        grayscale_image = pygame.transform.scale(grayscale_image, (30, 50))
+        grayscale_image = pygame.surfarray.array3d(grayscale_image)
+        grayscale_image = np.mean(grayscale_image, axis=2)
+        grayscale_image = grayscale_image.astype(np.float32) / 255.0
+        image_flat = grayscale_image.flatten()
 
-        # Get and normalize scalar features
-        speed = self.get_speed()  # m/s
-        angle = self.get_angle()  # degrees
-        angular_velocity = self.get_angular_velocity()  # deg/s
+        speed = self.get_speed()
+        angle = self.get_angle()
+        angular_velocity = self.get_angular_velocity()
 
-        speed_norm = np.clip(speed / 30.0, -1.0, 1.0)  # assume max speed ~30 m/s
-        angle_norm = np.clip(angle / 180.0, -1.0, 1.0)  # degrees -> [-1, 1]
-        angular_velocity_norm = np.clip(angular_velocity / 360.0, -1.0, 1.0)  # assume ±360 deg/s
+        speed_norm = np.clip(np.array(speed / 30.0, dtype=np.float32), -1.0, 1.0)
+        angle_norm = np.clip(np.array(angle / 180.0, dtype=np.float32), -1.0, 1.0)
+        angular_velocity_norm = np.clip(np.array(angular_velocity / 360.0, dtype=np.float32), -1.0, 1.0)
 
-        scalars = np.array([speed_norm, angle_norm, angular_velocity_norm], dtype=np.float32)
+        scalars_flat = np.array([speed_norm, angle_norm, angular_velocity_norm], dtype=np.float32)
 
-        return {"image": image_flat, "scalars": scalars}
+        input_image = torch.tensor(image_flat, dtype=torch.float32).view(1, 1, 30, 50).clone().detach()
+        input_scalar = torch.tensor(scalars_flat, dtype=torch.float32).clone().detach()
 
-
-
-
-
-
+        return input_image, input_scalar

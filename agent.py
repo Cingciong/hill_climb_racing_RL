@@ -5,6 +5,8 @@ import random
 import copy
 import numpy as np
 import time
+import hashlib
+import seaborn as sns
 
 from sympy.abc import epsilon
 from tqdm import tqdm
@@ -20,26 +22,14 @@ class Agent(nn.Module):
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
 
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.fc_image = nn.Linear(64 * 30 * 50, 48)
-        self.fc_inputs = nn.Linear(3, 16)
-        self.final_fc = nn.Linear(48 + 16, self.n_actions)
-
-    def forward(self, image_input, scalar_inputs):
-        x_image = F.relu(self.conv1(image_input))
-        x_image = F.relu(self.conv2(x_image))
-        x_image = x_image.view(x_image.size(0), -1)
-        x_image = F.relu(self.fc_image(x_image))
-
-        x_fc = F.relu(self.fc_inputs(scalar_inputs))
-        if x_fc.dim() == 1:
-            x_fc = x_fc.unsqueeze(0)
-        combined = torch.cat((x_image, x_fc), dim=1)
+        self.fc1 = nn.Linear(3, 8)
+        self.fc2 = nn.Linear(8, n_actions)
 
 
-        output = self.final_fc(combined)
-        return output
+    def forward(self, image_flat, scalars_flat):
+        x = F.relu(self.fc1(scalars_flat))
+        x = self.fc2(x)
+        return x
 
     def get_action(self,  input_image ,input_scalar):
         input_image = torch.tensor(input_image, dtype=torch.float32)  # Convert to tensor
@@ -64,104 +54,102 @@ class Agent(nn.Module):
         self.load_state_dict(torch.load(path))
         self.eval()
 
-    def add_noise_to_model(self, noise_level=0.1):
-        """Add random noise to model's parameters."""
-        for param in self.parameters():
-            noise = torch.randn_like(param) * noise_level
-            param.data.add_(noise)
+    def model_signature(model):
+        # Creates a hash based on all parameters in the model
+        params = torch.cat([p.flatten().detach().cpu() for p in model.parameters()])
+        return hashlib.md5(params.numpy().tobytes()).hexdigest()[:8]
 
-    def train(self, game_env, iterations=100, noise_level=0.1, max_time=5):
+    def add_noise_to_model(self, noise_level):
+        for param in self.parameters():
+            if param.requires_grad:
+                noise = torch.randn_like(param) * noise_level * self.epsilon
+                param.data.add_(noise)
+
+    def train(self, game_env, iterations=200, noise_level=0.05, max_time=10):
+
         best_reward = 10
         best_model = self
-        best_iteration = 0
         rewards_history = []
         epsilon_history = []
+        cars = len(game_env.cars)
+        noisy_models = []
+        model_sigs = []
 
         for i in tqdm(range(iterations), desc="Training Progress", ncols=100):
-            start_time = time.time()
+            for n in range(cars):
+                noisy_model = copy.deepcopy(best_model)
+                noisy_model.add_noise_to_model(noise_level)
+                noisy_models.append(noisy_model)
 
-            noisy_model = copy.deepcopy(best_model)
-            noisy_model.add_noise_to_model(noise_level)
+            rewards = self.evaluate_model(game_env, noisy_models, max_time=max_time)
+            best_noisy_reward = max(rewards.values())
+            best_noisy_model_index = max(rewards, key=rewards.get)
 
-            reward = self.evaluate_model_with_time_limit(noisy_model, game_env, max_time)
+            if best_noisy_reward > best_reward:
+                best_reward = best_noisy_reward
+                best_model = noisy_models[best_noisy_model_index]
+                print(f"New best model found at iteration {i} with reward: {best_reward}")
 
-            rewards_history.append(reward)
-            epsilon_history.append(self.epsilon)
 
-            if reward > best_reward:
-                print(f"!!!!!!New best model found at iteration {i} with reward: {reward} is better than {best_reward}")
-
-                best_reward = reward
-                best_model = noisy_model
-                best_iteration = i
-            else:
-                print(f" reward: {reward} is worse than best reward  {best_reward}")
-            elapsed_time = time.time() - start_time
-
-            if elapsed_time > max_time:
-                tqdm.write(f"Iteration {i} exceeded {max_time} seconds, skipping...")
-                continue
-            tqdm.write(f"Iteration {i}: Current best reward: {best_reward}, Best iteration: {best_iteration}")
-
+            rewards_history.append(best_noisy_reward)
+            epsilon_history.append(noisy_models[best_noisy_model_index].epsilon)
 
             self.decay_epsilon()
 
-        # Plotting the rewards after training
-        self.plot_var(rewards_history, epsilon_history)
+            noisy_models.clear()
+            model_sigs.clear()
+
+        self.plot_var(rewards_history, 'reward history')
+        self.plot_var(epsilon_history, 'epsilon history')
 
         return best_model
 
-    def plot_var(self, rewards_history,epsilon_history):
-        """Plot rewards history after training is completed, with linear approximation."""
-        plt.figure(figsize=(10, 6))
-
-        # Plot actual rewards
-        plt.plot(rewards_history, label="Reward per iteration", color='blue')
-
-        # Linear approximation
-        x = np.arange(len(rewards_history))
-        y = np.array(rewards_history)
-        a, b = np.polyfit(x, y, 1)  # Fit a straight line
-        y_fit = a * x + b
-        plt.plot(x, y_fit, label=f"Linear Fit: y = {a:.2f}x + {b:.2f}", color='red', linestyle='--')
-
-        plt.xlabel("Iterations")
-        plt.ylabel("Reward")
-        plt.title("Training Progress: Rewards per Iteration")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
-        plt.figure(figsize=(10, 6))
-        plt.plot(epsilon_history, label="epsilon per iteration")
-        plt.xlabel("Iterations")
-        plt.ylabel("epsilon")
-        plt.title("Training Progress: Rewards per Iteration")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
-
-    def evaluate_model_with_time_limit(self, model, game_env, max_time):
-        """Evaluate the model with a time limit for the evaluation phase."""
+    def evaluate_model(self, game_env, noisy_models,  max_time):
         start_time = time.time()
         game_env.reset()
+        no_action =2
         done = False
-        reward = 0
-        no_action = 2  # Define a placeholder action (e.g., 'no action' or a default action)
 
-        # Make sure to provide the 'action' parameter
-        image_flat, scalars_flat, done = game_env.step(no_action)  # Providing 'no_action' here
+        cars = game_env.cars
+        no_actions = {i:  no_action for i in range(len(cars))}
+        rewards = {i: 0 for i in range(len(cars))}
+        images_flat, scalars_flat = game_env.step(no_actions)
 
         while not done:
-            # Exit if the evaluation time exceeds the limit
             if time.time() - start_time > max_time:
-                tqdm.write("Evaluation time exceeded max time, ending evaluation early.")
-                break  # Stop the evaluation if it exceeds max time
+                print("\n")
+                break
 
-            # Here, we would typically use the model to predict the next action
-            action = model.get_action(image_flat, scalars_flat)
+            actions = []
+            for i, car in enumerate(cars):
+                action = noisy_models[i].get_action(images_flat[i], scalars_flat[i])
+                actions.append(action)
+                rewards[i] = car.distance
+            images_flat, scalars_flat = game_env.step(actions)
 
-            # Pass the action as the required parameter
-            image_flat, scalars_flat, done = game_env.step(action)  # Pass the action
+        return rewards
 
-        reward = game_env.reward()
-        return reward
+
+
+    def plot_var(self, var, var_name="Variable"):
+        """Plot given variable with linear approximation if applicable."""
+        plt.figure(figsize=(10, 6))
+
+        # Plot the variable
+        plt.plot(var, label=f"{var_name} per iteration", color='blue')
+
+        # If it's numeric, try to fit a line
+        if isinstance(var, (list, np.ndarray)) and all(isinstance(v, (int, float)) for v in var):
+            x = np.arange(len(var))
+            y = np.array(var)
+            a, b = np.polyfit(x, y, 1)
+            y_fit = a * x + b
+            plt.plot(x, y_fit, label=f"Linear Fit: y = {a:.2f}x + {b:.2f}", color='red', linestyle='--')
+
+        plt.xlabel("Iterations")
+        plt.ylabel(var_name)
+        plt.title(f"Training Progress: {var_name} per Iteration")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
