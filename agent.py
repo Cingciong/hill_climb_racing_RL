@@ -1,50 +1,39 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import random
+import time
 import copy
 import numpy as np
-import time
-
-from sympy.abc import epsilon
-from tqdm import tqdm
 import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+from tqdm import tqdm
+
 
 class Agent(nn.Module):
-
-    def __init__(self, n_actions=3, epsilon=1.0, epsilon_min=0.01, epsilon_decay=0.995):
+    def __init__(self, n_actions=3, epsilon=1.0, epsilon_min=0.01, epsilon_decay=0.995, device=None):
         super(Agent, self).__init__()
 
         self.n_actions = n_actions
         self.epsilon = epsilon
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
+        self.device = device if device else torch.device(
+            'cuda' if torch.cuda.is_available() else 'cpu')  # Default to GPU if available
 
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.fc_image = nn.Linear(64 * 30 * 50, 48)
-        self.fc_inputs = nn.Linear(3, 16)
-        self.final_fc = nn.Linear(48 + 16, self.n_actions)
+        # Define a single fully connected layer for the 3 scalar inputs
+        self.fc = nn.Linear(3, n_actions)  # 3 inputs -> n_actions outputs
+
+        # Move the model to the specified device
+        self.to(self.device)
 
     def forward(self, image_input, scalar_inputs):
-        x_image = F.relu(self.conv1(image_input))
-        x_image = F.relu(self.conv2(x_image))
-        x_image = x_image.view(x_image.size(0), -1)
-        x_image = F.relu(self.fc_image(x_image))
-
-        x_fc = F.relu(self.fc_inputs(scalar_inputs))
-        if x_fc.dim() == 1:
-            x_fc = x_fc.unsqueeze(0)
-        combined = torch.cat((x_image, x_fc), dim=1)
-
-
-        output = self.final_fc(combined)
+        output = self.fc(scalar_inputs)
         return output
 
-    def get_action(self,  input_image ,input_scalar):
-        input_image = torch.tensor(input_image, dtype=torch.float32)  # Convert to tensor
-        input_image = input_image.view(1, 1, 30, 50)  # Add batch dimension and channel dimension (shape: [1, 1, H, W])
-        input_scalar = torch.tensor(input_scalar, dtype=torch.float32)
+    def get_action(self, input_image, input_scalar):
+        # Move inputs to device
+        input_image = torch.tensor(input_image, dtype=torch.float32).to(self.device)
+        input_image = input_image.view(1, 1, 30, 50)  # Add batch and channel dimensions
+        input_scalar = torch.tensor(input_scalar, dtype=torch.float32).to(self.device)
 
         if random.random() < self.epsilon:
             action = random.choice(range(self.n_actions))
@@ -61,7 +50,8 @@ class Agent(nn.Module):
 
     def load_model(self, path):
         """Load model weights from a saved file."""
-        self.load_state_dict(torch.load(path))
+        state_dict = torch.load(path, map_location=self.device)  # Ensure compatibility with device
+        self.load_state_dict(state_dict)
         self.eval()
 
     def add_noise_to_model(self, noise_level=0.1):
@@ -70,12 +60,13 @@ class Agent(nn.Module):
             noise = torch.randn_like(param) * noise_level
             param.data.add_(noise)
 
-    def train(self, game_env, iterations=100, noise_level=0.1, max_time=5):
+    def train(self, game_env, iterations=200, noise_level=0.1, max_time=30):
         best_reward = 10
         best_model = self
         best_iteration = 0
         rewards_history = []
         epsilon_history = []
+        weight_history = []  # List to store weights at each iteration
 
         for i in tqdm(range(iterations), desc="Training Progress", ncols=100):
             start_time = time.time()
@@ -87,6 +78,9 @@ class Agent(nn.Module):
 
             rewards_history.append(reward)
             epsilon_history.append(self.epsilon)
+
+            # Track the weights at this iteration
+            weight_history.append(noisy_model.fc.weight.data.cpu().numpy())  # Store weights of fc layer
 
             if reward > best_reward:
                 print(f"!!!!!!New best model found at iteration {i} with reward: {reward} is better than {best_reward}")
@@ -103,15 +97,17 @@ class Agent(nn.Module):
                 continue
             tqdm.write(f"Iteration {i}: Current best reward: {best_reward}, Best iteration: {best_iteration}")
 
-
             self.decay_epsilon()
 
         # Plotting the rewards after training
         self.plot_var(rewards_history, epsilon_history)
 
+        # Plot weights over time
+        self.plot_weights_over_time(weight_history)
+
         return best_model
 
-    def plot_var(self, rewards_history,epsilon_history):
+    def plot_var(self, rewards_history, epsilon_history):
         """Plot rewards history after training is completed, with linear approximation."""
         plt.figure(figsize=(10, 6))
 
@@ -131,11 +127,30 @@ class Agent(nn.Module):
         plt.legend()
         plt.grid(True)
         plt.show()
+
         plt.figure(figsize=(10, 6))
         plt.plot(epsilon_history, label="epsilon per iteration")
         plt.xlabel("Iterations")
         plt.ylabel("epsilon")
-        plt.title("Training Progress: Rewards per Iteration")
+        plt.title("Training Progress: epsilon per Iteration")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
+    def plot_weights_over_time(self, weight_history):
+        """Plot how the model weights change over time during training."""
+        plt.figure(figsize=(10, 6))
+
+        # Extracting the weights from weight_history to plot
+        weight_history = np.array(weight_history)  # Convert list to a numpy array for easy plotting
+
+        # Plot the weights for each neuron (this example assumes a fully connected layer)
+        for i in range(weight_history.shape[1]):
+            plt.plot(weight_history[:, i], label=f"Weight {i}")
+
+        plt.xlabel("Iterations")
+        plt.ylabel("Weight Value")
+        plt.title("Weight Change Over Time (FC Layer)")
         plt.legend()
         plt.grid(True)
         plt.show()
@@ -165,3 +180,25 @@ class Agent(nn.Module):
 
         reward = game_env.reward()
         return reward
+
+    def play_best_model(self, game_env, model_path='best_model.pth', max_time=30):
+        """Load and play using the best pre-trained model without training."""
+        self.load_model(model_path)  # Load the trained weights
+        game_env.reset()
+        done = False
+        no_action = 2  # Default starting action
+        image_flat, scalars_flat, done = game_env.step(no_action)
+
+        start_time = time.time()
+
+        while not done:
+            if time.time() - start_time > max_time:
+                print("Time limit reached.")
+                break
+
+            action = self.get_action(image_flat, scalars_flat)
+            image_flat, scalars_flat, done = game_env.step(action)
+
+        reward = game_env.reward()
+        print(f"Finished episode. Final reward: {reward}")
+
