@@ -5,14 +5,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+from sympy.physics.paulialgebra import epsilon
 from tqdm import tqdm
 
 
 class Agent(nn.Module):
-    def __init__(self, n_actions=3, epsilon=1.0, epsilon_min=0.01, epsilon_decay=0.995, device=None):
+    def __init__(self, n_actions=3, epsilon=1.0, epsilon_min=0.005, epsilon_decay=0.95,track_length=1000.0, device=None):
         super(Agent, self).__init__()
-
         self.n_actions = n_actions
+        self.track_length = track_length
         self.epsilon = epsilon
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
@@ -44,49 +45,79 @@ class Agent(nn.Module):
         return action
 
     def decay_epsilon(self):
-        """Decay epsilon to reduce exploration over time."""
+        print("Decaying epsilon")
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 
-    def load_model(self, path):
+    def load_model(self, path, game_env):
+
+        max_steps = 10000
         """Load model weights from a saved file."""
         state_dict = torch.load(path, map_location=self.device)  # Ensure compatibility with device
         self.load_state_dict(state_dict)
         self.eval()
 
-    def add_noise_to_model(self, noise_level=0.1):
-        """Add random noise to model's parameters."""
-        for param in self.parameters():
-            noise = torch.randn_like(param) * noise_level
-            param.data.add_(noise)
+        # Reset the game environment
+        game_env.reset()
 
-    def train(self, game_env, iterations=200, noise_level=0.1, max_time=30):
-        best_reward = 10
+        done = False
+        step_count = 0
+        no_action = 2  # Default starting action
+
+        # Start the game with an initial action
+        image_flat, scalars_flat, done = game_env.step(no_action)
+
+        while not done and step_count < max_steps:
+            step_count += 1
+
+            # Get the action from the model
+            action = self.get_action(image_flat, scalars_flat)
+
+            # Perform the action and get the next state
+            image_flat, scalars_flat, done = game_env.step(action)
+
+        reward = game_env.reward()
+        print(f"Finished episode after {step_count} steps. Final reward: {reward}")
+
+    def add_noise_to_model(self, noise_level=0.1, epsilon=0.1):
+        noise_snapshot = []
+        for param in self.parameters():
+            noise = torch.randn_like(param) * noise_level * epsilon
+            param.data.add_(noise)
+            noise_snapshot.append(noise.cpu().numpy())  # Save for later plotting
+        return noise_snapshot
+
+    def train(self, game_env, iterations=10, noise_level=0.1, max_time=200):
+        best_reward = 0
         best_model = self
         best_iteration = 0
         rewards_history = []
         epsilon_history = []
-        weight_history = []  # List to store weights at each iteration
+        noise_history = []
+        weight_history = []
 
         for i in tqdm(range(iterations), desc="Training Progress", ncols=100):
             start_time = time.time()
 
+            if (best_reward > 0):
+                distance_remaining = max(self.track_length - best_reward, 0)
+                self.epsilon = (distance_remaining / self.track_length) ** 2
+
             noisy_model = copy.deepcopy(best_model)
-            noisy_model.add_noise_to_model(noise_level)
+            noise_snapshot = noisy_model.add_noise_to_model(noise_level, epsilon=self.epsilon)
+            noise_history.append(noise_snapshot)
 
             reward = self.evaluate_model_with_time_limit(noisy_model, game_env, max_time)
 
             rewards_history.append(reward)
             epsilon_history.append(self.epsilon)
-
-            # Track the weights at this iteration
-            weight_history.append(noisy_model.fc.weight.data.cpu().numpy())  # Store weights of fc layer
+            weight_history.append(noisy_model.fc.weight.data.cpu().numpy())
 
             if reward > best_reward:
                 print(f"!!!!!!New best model found at iteration {i} with reward: {reward} is better than {best_reward}")
-
-                best_reward = reward
+                noisy_model.epsilon = self.epsilon
                 best_model = noisy_model
+                best_reward = reward
                 best_iteration = i
             else:
                 print(f" reward: {reward} is worse than best reward  {best_reward}")
@@ -97,12 +128,10 @@ class Agent(nn.Module):
                 continue
             tqdm.write(f"Iteration {i}: Current best reward: {best_reward}, Best iteration: {best_iteration}")
 
-            self.decay_epsilon()
 
-        # Plotting the rewards after training
+
         self.plot_var(rewards_history, epsilon_history)
-
-        # Plot weights over time
+        self.plot_noise_over_time(noise_history)
         self.plot_weights_over_time(weight_history)
 
         return best_model
@@ -155,13 +184,22 @@ class Agent(nn.Module):
         plt.grid(True)
         plt.show()
 
+    def plot_noise_over_time(self, noise_history):
+        """Visualize the noise added to weights over time."""
+        plt.figure(figsize=(10, 6))
+        flat_noise = [np.mean([np.mean(layer) for layer in iteration]) for iteration in noise_history]
+        plt.plot(flat_noise, label="Average noise per iteration", color='purple')
+        plt.xlabel("Iterations")
+        plt.ylabel("Average Noise Magnitude")
+        plt.title("Noise Added to Weights Over Time")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
     def evaluate_model_with_time_limit(self, model, game_env, max_time):
-        """Evaluate the model with a time limit for the evaluation phase."""
         start_time = time.time()
         game_env.reset()
-        done = False
-        reward = 0
-        no_action = 2  # Define a placeholder action (e.g., 'no action' or a default action)
+        no_action = 2
 
         # Make sure to provide the 'action' parameter
         image_flat, scalars_flat, done = game_env.step(no_action)  # Providing 'no_action' here
@@ -181,24 +219,6 @@ class Agent(nn.Module):
         reward = game_env.reward()
         return reward
 
-    def play_best_model(self, game_env, model_path='best_model.pth', max_time=30):
-        """Load and play using the best pre-trained model without training."""
-        self.load_model(model_path)  # Load the trained weights
-        game_env.reset()
-        done = False
-        no_action = 2  # Default starting action
-        image_flat, scalars_flat, done = game_env.step(no_action)
 
-        start_time = time.time()
 
-        while not done:
-            if time.time() - start_time > max_time:
-                print("Time limit reached.")
-                break
-
-            action = self.get_action(image_flat, scalars_flat)
-            image_flat, scalars_flat, done = game_env.step(action)
-
-        reward = game_env.reward()
-        print(f"Finished episode. Final reward: {reward}")
 

@@ -6,7 +6,7 @@ from constants import *
 
 class Terrain:
 
-    def __init__(self, space, screen, seed=123, length=1000, step_distance=15, base_y=500, scale=0.003, amp_start=10, amp_end=300):
+    def __init__(self, space, screen, seed=123, length=1000, step_distance=15, base_y=500, scale=0.003, amp_start=70, amp_end=300):
         self.space = space
         self.screen = screen
         self.seed = seed
